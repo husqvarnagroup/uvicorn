@@ -39,6 +39,14 @@ class ProxyHeadersMiddleware:
 
         return None  # pragma: full coverage
 
+    def parse_forwarded(self, forwarded: str) -> dict:
+        forwarded_dict = {}
+        # We are only interested in the initial request
+        for pair in forwarded.split(",")[0].split(';'):
+            key, value = pair.split("=")
+            forwarded_dict[key.strip()] = value.strip()
+        return forwarded_dict
+
     async def __call__(self, scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable) -> None:
         if scope["type"] in ("http", "websocket"):
             scope = cast(Union["HTTPScope", "WebSocketScope"], scope)
@@ -48,14 +56,21 @@ class ProxyHeadersMiddleware:
             if self.always_trust or client_host in self.trusted_hosts:
                 headers = dict(scope["headers"])
 
-                if b"x-forwarded-proto" in headers:
+                forwarded_dict = {}
+                if b"forwarded" in headers:
+                    forwarded = headers[b"forwarded"].decode("latin1").strip()
+                    forwarded_dict = self.parse_forwarded(forwarded)
+
+                if "proto" in forwarded_dict or b"x-forwarded-proto" in headers:
                     # Determine if the incoming request was http or https based on
                     # the X-Forwarded-Proto header.
-                    x_forwarded_proto = headers[b"x-forwarded-proto"].decode("latin1").strip()
+                    proto = forwarded_dict.get("proto", None)
+                    if proto is None:
+                        proto = headers[b"x-forwarded-proto"].decode("latin1").strip()
                     if scope["type"] == "websocket":
-                        scope["scheme"] = x_forwarded_proto.replace("http", "ws")
+                        scope["scheme"] = proto.replace("http", "ws")
                     else:
-                        scope["scheme"] = x_forwarded_proto
+                        scope["scheme"] = proto
 
                 if b"x-forwarded-for" in headers:
                     # Determine the client address from the last trusted IP in the
@@ -66,5 +81,10 @@ class ProxyHeadersMiddleware:
                     host = self.get_trusted_client_host(x_forwarded_for_hosts)
                     port = 0
                     scope["client"] = (host, port)  # type: ignore[arg-type]
+
+                if "host" in forwarded_dict:
+                    headers[b"host"] = forwarded_dict["host"].encode("latin1")
+
+                scope['headers'] = [(k, v) for k, v in headers.items()]
 
         return await self.app(scope, receive, send)
